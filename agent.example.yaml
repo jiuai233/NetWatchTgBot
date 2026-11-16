@@ -1,0 +1,22 @@
+mode: agent
+agent_token: "change-me-secret-token"
+master_url: "http://MASTER_IP:18080/api/v1/report"
+
+local_collector:
+  enabled: true
+  node_id: "vps-new"
+  interface: ""
+  watch_ports: [443]
+  clash_api_url: ""
+  clash_secret: ""
+  interval_sec: 30
+  register:
+    id: "vps-new"
+    name: "新节点"
+    host: "" # 留空则主控自动提取上报源 IP
+    port: 443
+    probe_port: 0
+    protocol: "VLESS"
+    quota_gb: 500
+    reset_day: 1
+    expire_date: "2026-12-31"

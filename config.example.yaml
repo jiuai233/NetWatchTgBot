@@ -1,0 +1,38 @@
+mode: master
+listen_addr: ":18080"
+agent_token: "change-me-secret-token"
+db_path: "netwatch.db"
+globalping_token: "" # 可选，匿名每小时也有 250 次免费测点额度
+
+telegram:
+  bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
+  allowed_user_ids: [] # 留空则不限制；填数字列表可设为白名单
+
+local_collector:
+  enabled: true
+  node_id: "vps-us"
+  interface: "" # 留空自动汇总非 lo 网卡
+  watch_ports: [51102, 23333]
+  clash_api_url: "http://127.0.0.1:9090"
+  clash_secret: ""
+  interval_sec: 30
+
+nodes:
+  - id: "vps-us"
+    name: "美国节点"
+    host: "203.0.113.10"
+    port: 51102
+    probe_port: 23333
+    protocol: "Hysteria2"
+    quota_gb: 700
+    reset_day: 4
+    expire_date: "2026-12-04"
+
+  - id: "vps-sg"
+    name: "新加坡节点"
+    host: "203.0.113.20"
+    port: 57423
+    protocol: "VLESS"
+    quota_gb: 800
+    reset_day: 26
+    expire_date: "2026-11-26"
