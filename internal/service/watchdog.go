@@ -14,36 +14,40 @@ import (
 type AlertSender func(text string)
 
 type nodeWatchState struct {
-	failStreak int
-	alerting   bool
-	reason     string
-	downSince  time.Time
+	failStreak  int
+	okStreak    int
+	alerting    bool
+	reason      string
+	downSince   time.Time
+	lastAlertAt time.Time
 }
 
 type Watchdog struct {
-	agg    *Aggregator
-	store  *store.Store
-	send   AlertSender
-	states map[string]*nodeWatchState
-	cst    *time.Location
+	agg      *Aggregator
+	store    *store.Store
+	send     AlertSender
+	states   map[string]*nodeWatchState
+	cst      *time.Location
+	cooldown time.Duration
 }
 
 func NewWatchdog(agg *Aggregator, st *store.Store, send AlertSender) *Watchdog {
 	return &Watchdog{
-		agg:    agg,
-		store:  st,
-		send:   send,
-		states: make(map[string]*nodeWatchState),
-		cst:    time.FixedZone("CST", 8*3600),
+		agg:      agg,
+		store:    st,
+		send:     send,
+		states:   make(map[string]*nodeWatchState),
+		cst:      time.FixedZone("CST", 8*3600),
+		cooldown: 30 * time.Minute,
 	}
 }
 
 func (w *Watchdog) Run(ctx context.Context) {
-	// Wait a bit on startup so agents have time to check in
+	// Wait on startup so agents have time to check in
 	select {
 	case <-ctx.Done():
 		return
-	case <-time.After(45 * time.Second):
+	case <-time.After(60 * time.Second):
 	}
 
 	w.CheckAll()
@@ -71,28 +75,42 @@ func (w *Watchdog) CheckAll() {
 		reason := w.inspectNode(nd, now)
 		if reason != "" {
 			st.failStreak++
-			if st.failStreak >= 2 && !st.alerting {
+			st.okStreak = 0
+			// Require 3 consecutive failed checks (~3 min) and respect 30m per-node cooldown
+			if st.failStreak >= 3 && !st.alerting {
 				st.alerting = true
 				st.reason = reason
 				st.downSince = now
-				w.send(fmt.Sprintf(
-					"🚨 <b>节点异常告警</b>\n节点：<b>%s</b> (<code>%s:%d</code>)\n原因：%s\n时间：%s UTC+8",
-					escHTML(nd.Name), escHTML(nd.Host), nd.Port, escHTML(reason), now.In(w.cst).Format("2006-01-02 15:04:05"),
-				))
+				if st.lastAlertAt.IsZero() || now.Sub(st.lastAlertAt) >= w.cooldown {
+					st.lastAlertAt = now
+					w.send(fmt.Sprintf(
+						"🚨 <b>节点异常告警</b>\n节点：<b>%s</b> (<code>%s:%d</code>)\n原因：%s\n时间：%s UTC+8",
+						escHTML(nd.Name), escHTML(nd.Host), nd.Port, escHTML(reason), now.In(w.cst).Format("2006-01-02 15:04:05"),
+					))
+				}
 			} else if st.alerting {
 				st.reason = reason
 			}
-		} else {
-			if st.alerting {
+			continue
+		}
+
+		// Healthy check
+		st.failStreak = 0
+		if st.alerting {
+			st.okStreak++
+			// Require 2 consecutive healthy checks (~2 min) before clearing alert
+			if st.okStreak >= 2 {
 				dur := now.Sub(st.downSince).Round(time.Second)
-				w.send(fmt.Sprintf(
-					"✅ <b>节点已恢复正常</b>\n节点：<b>%s</b> (<code>%s:%d</code>)\n此前异常：%s\n持续时长：%s\n时间：%s UTC+8",
-					escHTML(nd.Name), escHTML(nd.Host), nd.Port, escHTML(st.reason), dur.String(), now.In(w.cst).Format("2006-01-02 15:04:05"),
-				))
+				st.alerting = false
+				st.okStreak = 0
+				if !st.lastAlertAt.IsZero() {
+					w.send(fmt.Sprintf(
+						"✅ <b>节点已恢复正常</b>\n节点：<b>%s</b> (<code>%s:%d</code>)\n此前异常：%s\n持续时长：%s\n时间：%s UTC+8",
+						escHTML(nd.Name), escHTML(nd.Host), nd.Port, escHTML(st.reason), dur.String(), now.In(w.cst).Format("2006-01-02 15:04:05"),
+					))
+				}
+				st.reason = ""
 			}
-			st.failStreak = 0
-			st.alerting = false
-			st.reason = ""
 		}
 	}
 }
@@ -104,14 +122,14 @@ func (w *Watchdog) inspectNode(nd model.NodeDef, now time.Time) string {
 	sample, hasSample := w.store.GetLatestSample(nd.ID)
 	if !hasSample {
 		issues = append(issues, "Agent 尚未上报心跳")
-	} else if now.Sub(sample.Timestamp) > 150*time.Second {
+	} else if now.Sub(sample.Timestamp) > 180*time.Second {
 		ago := now.Sub(sample.Timestamp).Round(time.Second)
 		issues = append(issues, fmt.Sprintf("Agent 心跳失联 (%s 无数据)", ago))
 	} else {
-		if sample.DiskPct >= 92 {
+		if sample.DiskPct >= 95 {
 			issues = append(issues, fmt.Sprintf("磁盘空间告警 (%.0f%%)", sample.DiskPct))
 		}
-		if sample.MemPct >= 95 {
+		if sample.MemPct >= 97 {
 			issues = append(issues, fmt.Sprintf("内存占满告警 (%.0f%%)", sample.MemPct))
 		}
 	}
@@ -127,27 +145,6 @@ func (w *Watchdog) inspectNode(nd model.NodeDef, now time.Time) string {
 	if nd.Host != "" && checkPort > 0 {
 		if !tcpProbe(nd.Host, checkPort) {
 			issues = append(issues, fmt.Sprintf("端口 %d TCP 连接超时", checkPort))
-		}
-	}
-
-	// 3. Guangdong all-down check (if Globalping probes exist and are fresh within 45min)
-	probes, err := w.store.GetProbes(nd.ID)
-	if err == nil {
-		var gdTotal, gdDown int
-		var latestGD time.Time
-		for _, p := range probes {
-			if p.Tag == "gd" {
-				gdTotal++
-				if p.UpdatedAt.After(latestGD) {
-					latestGD = p.UpdatedAt
-				}
-				if p.Status == "down" || p.LatencyMs <= 0 {
-					gdDown++
-				}
-			}
-		}
-		if gdTotal >= 2 && gdDown == gdTotal && now.Sub(latestGD) < 45*time.Minute {
-			issues = append(issues, "广东探针全部不可达 (疑似被阻断)")
 		}
 	}
 
