@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"netwatch/internal/config"
@@ -29,8 +28,6 @@ type Bot struct {
 	store   *store.Store
 	client  *http.Client
 	allowed map[int64]bool
-	mu      sync.Mutex
-	modes   map[int64]bool // chatID -> true means text mode
 }
 
 func New(cfg *config.Config, agg *service.Aggregator, st *store.Store) *Bot {
@@ -44,7 +41,6 @@ func New(cfg *config.Config, agg *service.Aggregator, st *store.Store) *Bot {
 		store:   st,
 		client:  &http.Client{Timeout: 45 * time.Second},
 		allowed: allowed,
-		modes:   make(map[int64]bool),
 	}
 }
 
@@ -128,38 +124,12 @@ func (b *Bot) isAllowed(userID int64) bool {
 func (b *Bot) registerMenu() {
 	b.postJSON("setMyCommands", map[string]any{
 		"commands": []map[string]string{
-			{"command": "status", "description": "📊 节点总览看板"},
-			{"command": "gd", "description": "📡 测广东三网延迟 (Globalping)"},
-			{"command": "clients", "description": "🌐 在线连接 IP 与流量消耗"},
-			{"command": "chart", "description": "🖼 切换卡片图模式"},
-			{"command": "text", "description": "📝 切换纯文字模式"},
+			{"command": "status", "description": "📊 节点总览"},
+			{"command": "clients", "description": "🌐 在线 IP 与流量消耗"},
+			{"command": "gd", "description": "📡 测广东三网延迟"},
+			{"command": "chart", "description": "🖼 发送总览卡片图"},
 		},
 	})
-}
-
-func (b *Bot) replyPanelKeyboard() map[string]any {
-	rows := [][]map[string]string{
-		{
-			{"text": "📊 节点总览"},
-			{"text": "📡 测广东延迟"},
-			{"text": "🌐 在线 IP"},
-		},
-	}
-	var nodeRow []map[string]string
-	for _, nd := range b.agg.ActiveNodes() {
-		nodeRow = append(nodeRow, map[string]string{"text": "🖥 " + nd.Name})
-		if len(nodeRow) == 2 {
-			rows = append(rows, nodeRow)
-			nodeRow = nil
-		}
-	}
-	if len(nodeRow) > 0 {
-		rows = append(rows, nodeRow)
-	}
-	return map[string]any{
-		"keyboard":        rows,
-		"resize_keyboard": true,
-	}
 }
 
 func (b *Bot) handleMessage(ctx context.Context, msg *tgMessage) {
@@ -171,61 +141,25 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgMessage) {
 		return
 	}
 
-	// Handle bottom quick-panel buttons
-	switch rawText {
-	case "📊 节点总览":
-		b.sendOverview(ctx, msg.Chat.ID, 0, "month")
-		return
-	case "📡 测广东延迟":
-		b.sendText(msg.Chat.ID, "正在用 Globalping 广州/深圳探针实测节点端口，约 5 秒...")
-		b.runGuangdongProbes(ctx)
-		b.sendOverview(ctx, msg.Chat.ID, 0, "month")
-		return
-	case "🌐 在线 IP":
-		list, err := b.agg.AllClientsEnriched(30)
-		if err != nil {
-			b.sendText(msg.Chat.ID, "查询失败: "+err.Error())
-			return
-		}
-		b.sendText(msg.Chat.ID, render.RenderClientsOnlyText(list))
-		return
-	}
-	if strings.HasPrefix(rawText, "🖥 ") {
-		name := strings.TrimPrefix(rawText, "🖥 ")
-		for _, nd := range b.agg.ActiveNodes() {
-			if nd.Name == name {
-				b.sendNodeDetail(ctx, msg.Chat.ID, 0, nd.ID, "1h")
-				return
-			}
-		}
-	}
-
 	cmd := strings.Fields(rawText)
 	c := strings.Split(cmd[0], "@")[0]
 	switch c {
 	case "/start":
+		// Explicitly remove any lingering reply keyboard on the user's Telegram client.
 		b.postJSON("sendMessage", map[string]any{
 			"chat_id":      msg.Chat.ID,
-			"text":         "已开启底部快捷操作面板，点击下方按钮或左下角菜单即可查看节点状态：",
-			"reply_markup": b.replyPanelKeyboard(),
+			"text":         "已收起底部键盘，使用左下角菜单或消息按钮即可。",
+			"reply_markup": map[string]any{"remove_keyboard": true},
 		})
-		b.sendOverview(ctx, msg.Chat.ID, 0, "month")
-	case "/status", "/watch":
-		b.sendOverview(ctx, msg.Chat.ID, 0, "month")
-	case "/text":
-		b.mu.Lock()
-		b.modes[msg.Chat.ID] = true
-		b.mu.Unlock()
-		b.sendOverview(ctx, msg.Chat.ID, 0, "month")
+		b.sendOverview(ctx, msg.Chat.ID, 0)
+	case "/status", "/watch", "/text":
+		b.sendOverview(ctx, msg.Chat.ID, 0)
 	case "/chart":
-		b.mu.Lock()
-		b.modes[msg.Chat.ID] = false
-		b.mu.Unlock()
-		b.sendOverview(ctx, msg.Chat.ID, 0, "month")
+		b.sendOverviewPhoto(ctx, msg.Chat.ID)
 	case "/gd":
-		b.sendText(msg.Chat.ID, "正在用 Globalping 广州/深圳探针实测节点端口，约 5 秒...")
+		b.sendText(msg.Chat.ID, "正在用 Globalping 广州/深圳探针实测节点延迟，约 5 秒...")
 		b.runGuangdongProbes(ctx)
-		b.sendOverview(ctx, msg.Chat.ID, 0, "month")
+		b.sendOverview(ctx, msg.Chat.ID, 0)
 	case "/clients":
 		list, err := b.agg.AllClientsEnriched(30)
 		if err != nil {
@@ -255,9 +189,9 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgMessage) {
 			return
 		}
 		b.sendText(msg.Chat.ID, fmt.Sprintf("已校准 <code>%s</code> 本周期已用流量为 <b>%.2f GB</b>", nodeID, gbVal))
-		b.sendOverview(ctx, msg.Chat.ID, 0, "month")
+		b.sendOverview(ctx, msg.Chat.ID, 0)
 	default:
-		b.sendOverview(ctx, msg.Chat.ID, 0, "month")
+		b.sendOverview(ctx, msg.Chat.ID, 0)
 	}
 }
 
@@ -272,121 +206,81 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgCallbackQuery) {
 
 	switch parts[0] {
 	case "ov":
-		period := "month"
-		if len(parts) > 1 {
-			period = parts[1]
-		}
 		b.answerCallback(cb.ID, "已刷新")
-		b.sendOverview(ctx, chatID, msgID, period)
+		b.sendOverview(ctx, chatID, msgID)
 	case "nd":
 		if len(parts) < 2 {
 			return
 		}
-		nodeID := parts[1]
-		win := "1h"
-		if len(parts) > 2 {
-			win = parts[2]
-		}
 		b.answerCallback(cb.ID, "已切换节点")
-		b.sendNodeDetail(ctx, chatID, msgID, nodeID, win)
+		b.sendNodeDetail(ctx, chatID, msgID, parts[1])
+	case "clients":
+		b.answerCallback(cb.ID, "已刷新在线 IP")
+		list, err := b.agg.AllClientsEnriched(30)
+		if err != nil {
+			b.sendText(chatID, "查询失败: "+err.Error())
+			return
+		}
+		kb := [][]inlineBtn{{
+			{Text: "🔄 刷新", CallbackData: "clients"},
+			{Text: "⬅️ 返回总览", CallbackData: "ov"},
+		}}
+		b.editText(chatID, msgID, render.RenderClientsOnlyText(list), kb)
 	case "gd":
 		b.answerCallback(cb.ID, "正在测广东三网延迟...")
 		b.runGuangdongProbes(ctx)
 		if len(parts) > 1 && parts[1] != "" {
-			b.sendNodeDetail(ctx, chatID, msgID, parts[1], "1h")
+			b.sendNodeDetail(ctx, chatID, msgID, parts[1])
 		} else {
-			b.sendOverview(ctx, chatID, msgID, "month")
+			b.sendOverview(ctx, chatID, msgID)
 		}
-	case "mode":
-		b.mu.Lock()
-		b.modes[chatID] = !b.modes[chatID]
-		textMode := b.modes[chatID]
-		b.mu.Unlock()
-		if textMode {
-			b.answerCallback(cb.ID, "已切为纯文字模式")
-		} else {
-			b.answerCallback(cb.ID, "已切为图表模式")
-		}
-		b.sendOverview(ctx, chatID, 0, "month")
 	}
 }
 
-func (b *Bot) sendOverview(ctx context.Context, chatID, editMsgID int64, period string) {
-	v, err := b.agg.BuildOverview(period)
+func (b *Bot) sendOverview(ctx context.Context, chatID, editMsgID int64) {
+	v, err := b.agg.BuildOverview("month")
 	if err != nil {
 		b.sendText(chatID, "生成总览失败: "+err.Error())
 		return
 	}
-
-	b.mu.Lock()
-	textMode := b.modes[chatID]
-	b.mu.Unlock()
-
-	kb := b.overviewKeyboard(period, textMode)
+	kb := b.overviewKeyboard()
 	txt := render.RenderOverviewText(v)
-
-	if textMode {
-		if editMsgID > 0 {
-			b.editText(chatID, editMsgID, txt, kb)
-		} else {
-			b.sendTextWithKB(chatID, txt, kb)
-		}
-		return
-	}
-
-	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("netwatch_ov_%d.png", time.Now().UnixNano()))
-	defer os.Remove(tmp)
-	if err := render.RenderOverviewPNG(v, tmp); err != nil {
-		b.sendTextWithKB(chatID, txt, kb)
-		return
-	}
-	caption := fmt.Sprintf("📊 <b>%s (%s)</b> · 在线节点 %d · 实时总速 %.1f KB/s",
-		v.Title, v.PeriodLabel, len(v.Nodes), v.CurrentBps/1024)
 	if editMsgID > 0 {
-		if err := b.editPhoto(chatID, editMsgID, tmp, caption, kb); err != nil {
-			b.sendPhoto(chatID, tmp, caption, kb)
-		}
+		b.editText(chatID, editMsgID, txt, kb)
 	} else {
-		b.sendPhoto(chatID, tmp, caption, kb)
+		b.sendTextWithKB(chatID, txt, kb)
 	}
 }
 
-func (b *Bot) sendNodeDetail(ctx context.Context, chatID, editMsgID int64, nodeID, win string) {
-	v, err := b.agg.BuildNodeDetail(nodeID, win)
+func (b *Bot) sendOverviewPhoto(ctx context.Context, chatID int64) {
+	v, err := b.agg.BuildOverview("month")
+	if err != nil {
+		b.sendText(chatID, "生成卡片失败: "+err.Error())
+		return
+	}
+	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("netwatch_ov_%d.png", time.Now().UnixNano()))
+	defer os.Remove(tmp)
+	if err := render.RenderOverviewPNG(v, tmp); err != nil {
+		b.sendText(chatID, render.RenderOverviewText(v))
+		return
+	}
+	caption := fmt.Sprintf("📊 <b>%s</b> · 在线节点 %d · 实时总速 %.1f KB/s",
+		v.Title, len(v.Nodes), v.CurrentBps/1024)
+	b.sendPhoto(chatID, tmp, caption, nil)
+}
+
+func (b *Bot) sendNodeDetail(ctx context.Context, chatID, editMsgID int64, nodeID string) {
+	v, err := b.agg.BuildNodeDetail(nodeID, "24h")
 	if err != nil {
 		b.sendText(chatID, "生成详情失败: "+err.Error())
 		return
 	}
-	b.mu.Lock()
-	textMode := b.modes[chatID]
-	b.mu.Unlock()
-
-	kb := b.detailKeyboard(nodeID, win, textMode)
+	kb := b.detailKeyboard(nodeID)
 	txt := render.RenderNodeDetailText(v)
-
-	if textMode {
-		if editMsgID > 0 {
-			b.editText(chatID, editMsgID, txt, kb)
-		} else {
-			b.sendTextWithKB(chatID, txt, kb)
-		}
-		return
-	}
-
-	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("netwatch_nd_%d.png", time.Now().UnixNano()))
-	defer os.Remove(tmp)
-	if err := render.RenderNodeDetailPNG(v, tmp); err != nil {
-		b.sendTextWithKB(chatID, txt, kb)
-		return
-	}
-	caption := fmt.Sprintf("🖥 <b>%s</b> · 健康度 %d (%s) · 广东平均 %.0fms · %d连接",
-		v.Node.Name, v.Node.HealthScore, v.Node.HealthLabel, v.Node.GDLatencyMs, v.Node.ActiveConns)
 	if editMsgID > 0 {
-		if err := b.editPhoto(chatID, editMsgID, tmp, caption, kb); err != nil {
-			b.sendPhoto(chatID, tmp, caption, kb)
-		}
+		b.editText(chatID, editMsgID, txt, kb)
 	} else {
-		b.sendPhoto(chatID, tmp, caption, kb)
+		b.sendTextWithKB(chatID, txt, kb)
 	}
 }
 
@@ -406,28 +300,19 @@ func (b *Bot) runGuangdongProbes(ctx context.Context) {
 	}
 }
 
-func (b *Bot) overviewKeyboard(period string, textMode bool) [][]inlineBtn {
-	modeLabel := "切纯文字"
-	if textMode {
-		modeLabel = "切卡片图"
-	}
+func (b *Bot) overviewKeyboard() [][]inlineBtn {
 	rows := [][]inlineBtn{
 		{
-			{Text: mark("今天", period == "today"), CallbackData: "ov:today"},
-			{Text: mark("本周", period == "week"), CallbackData: "ov:week"},
-			{Text: mark("本月", period == "month"), CallbackData: "ov:month"},
-		},
-		{
-			{Text: "🔄 刷新", CallbackData: "ov:" + period},
-			{Text: "📡 测广东延迟", CallbackData: "gd:"},
-			{Text: modeLabel, CallbackData: "mode"},
+			{Text: "🔄 刷新", CallbackData: "ov"},
+			{Text: "📡 测广东", CallbackData: "gd:"},
+			{Text: "🌐 在线 IP", CallbackData: "clients"},
 		},
 	}
 	var nodeRow []inlineBtn
 	for _, nd := range b.agg.ActiveNodes() {
 		nodeRow = append(nodeRow, inlineBtn{
-			Text:         "🖥 " + nd.Name,
-			CallbackData: "nd:" + nd.ID + ":1h",
+			Text:         nd.Name,
+			CallbackData: "nd:" + nd.ID,
 		})
 		if len(nodeRow) == 2 {
 			rows = append(rows, nodeRow)
@@ -440,37 +325,14 @@ func (b *Bot) overviewKeyboard(period string, textMode bool) [][]inlineBtn {
 	return rows
 }
 
-func (b *Bot) detailKeyboard(nodeID, win string, textMode bool) [][]inlineBtn {
-	modeLabel := "切纯文字"
-	if textMode {
-		modeLabel = "切卡片图"
-	}
+func (b *Bot) detailKeyboard(nodeID string) [][]inlineBtn {
 	return [][]inlineBtn{
 		{
-			{Text: mark("1h", win == "1h"), CallbackData: "nd:" + nodeID + ":1h"},
-			{Text: mark("24h", win == "24h"), CallbackData: "nd:" + nodeID + ":24h"},
-			{Text: mark("7d", win == "7d"), CallbackData: "nd:" + nodeID + ":7d"},
-		},
-		{
-			{Text: "🔄 刷新", CallbackData: "nd:" + nodeID + ":" + win},
-			{Text: "📡 测广东三网", CallbackData: "gd:" + nodeID},
-			{Text: modeLabel, CallbackData: "mode"},
-		},
-		{
-			{Text: "⬅️ 返回总览", CallbackData: "ov:month"},
+			{Text: "🔄 刷新", CallbackData: "nd:" + nodeID},
+			{Text: "📡 测广东", CallbackData: "gd:" + nodeID},
+			{Text: "⬅️ 返回", CallbackData: "ov"},
 		},
 	}
-}
-
-func mark(label string, active bool) string {
-	if active {
-		return "· " + label + " ·"
-	}
-	return label
-}
-
-func formatGB(b int64) string {
-	return fmt.Sprintf("%.2f GB", float64(b)/(1024*1024*1024))
 }
 
 func (b *Bot) apiURL(method string) string {
@@ -532,8 +394,10 @@ func (b *Bot) sendPhoto(chatID int64, path, caption string, kb [][]inlineBtn) {
 	_ = mw.WriteField("chat_id", fmt.Sprintf("%d", chatID))
 	_ = mw.WriteField("caption", caption)
 	_ = mw.WriteField("parse_mode", "HTML")
-	rm, _ := json.Marshal(map[string]any{"inline_keyboard": kb})
-	_ = mw.WriteField("reply_markup", string(rm))
+	if len(kb) > 0 {
+		rm, _ := json.Marshal(map[string]any{"inline_keyboard": kb})
+		_ = mw.WriteField("reply_markup", string(rm))
+	}
 	fw, err := mw.CreateFormFile("photo", filepath.Base(path))
 	if err != nil {
 		return
@@ -552,45 +416,6 @@ func (b *Bot) sendPhoto(chatID int64, path, caption string, kb [][]inlineBtn) {
 	if err == nil {
 		resp.Body.Close()
 	}
-}
-
-func (b *Bot) editPhoto(chatID, msgID int64, path, caption string, kb [][]inlineBtn) error {
-	var body bytes.Buffer
-	mw := multipart.NewWriter(&body)
-	_ = mw.WriteField("chat_id", fmt.Sprintf("%d", chatID))
-	_ = mw.WriteField("message_id", fmt.Sprintf("%d", msgID))
-	media, _ := json.Marshal(map[string]any{
-		"type":       "photo",
-		"media":      "attach://photo",
-		"caption":    caption,
-		"parse_mode": "HTML",
-	})
-	_ = mw.WriteField("media", string(media))
-	rm, _ := json.Marshal(map[string]any{"inline_keyboard": kb})
-	_ = mw.WriteField("reply_markup", string(rm))
-	fw, err := mw.CreateFormFile("photo", filepath.Base(path))
-	if err != nil {
-		return err
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	_, _ = io.Copy(fw, f)
-	f.Close()
-	mw.Close()
-
-	req, _ := http.NewRequest(http.MethodPost, b.apiURL("editMessageMedia"), &body)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("editPhoto status %d", resp.StatusCode)
-	}
-	return nil
 }
 
 func (b *Bot) postJSON(method string, payload any) {
