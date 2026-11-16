@@ -127,15 +127,27 @@ func (b *Bot) registerMenu() {
 			{"command": "status", "description": "📊 节点总览"},
 			{"command": "clients", "description": "🌐 在线 IP 与流量消耗"},
 			{"command": "gd", "description": "📡 测广东三网延迟"},
+			{"command": "alert", "description": "🔔 开关节点异常告警"},
 			{"command": "chart", "description": "🖼 发送总览卡片图"},
 		},
 	})
+}
+
+func (b *Bot) BroadcastAlert(text string) {
+	chats, err := b.store.ListAlertChats()
+	if err != nil {
+		return
+	}
+	for _, cid := range chats {
+		b.sendText(cid, text)
+	}
 }
 
 func (b *Bot) handleMessage(ctx context.Context, msg *tgMessage) {
 	if msg.From == nil || !b.isAllowed(msg.From.ID) {
 		return
 	}
+	b.store.EnsureAlertChat(msg.Chat.ID)
 	rawText := strings.TrimSpace(msg.Text)
 	if rawText == "" {
 		return
@@ -167,6 +179,22 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgMessage) {
 			return
 		}
 		b.sendText(msg.Chat.ID, render.RenderClientsOnlyText(list))
+	case "/alert":
+		cur := b.store.IsAlertEnabled(msg.Chat.ID)
+		next := !cur
+		if len(cmd) > 1 {
+			if cmd[1] == "on" {
+				next = true
+			} else if cmd[1] == "off" {
+				next = false
+			}
+		}
+		_ = b.store.SetAlertEnabled(msg.Chat.ID, next)
+		if next {
+			b.sendText(msg.Chat.ID, "🔔 已开启节点异常与恢复主动告警。")
+		} else {
+			b.sendText(msg.Chat.ID, "🔕 已关闭节点异常主动告警。")
+		}
 	case "/set":
 		if len(cmd) < 3 {
 			b.sendText(msg.Chat.ID, "用法：<code>/set vps-154 320.4</code>（校准本周期已用 GB）")
@@ -203,6 +231,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgCallbackQuery) {
 	parts := strings.Split(cb.Data, ":")
 	chatID := cb.Message.Chat.ID
 	msgID := cb.Message.MessageID
+	b.store.EnsureAlertChat(chatID)
 
 	switch parts[0] {
 	case "ov":

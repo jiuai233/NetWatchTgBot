@@ -323,6 +323,7 @@ func runMaster(args []string) {
 	}()
 
 	go tgBot.Run(ctx)
+	go service.NewWatchdog(agg, st, tgBot.BroadcastAlert).Run(ctx)
 
 	<-ctx.Done()
 	_ = srv.Shutdown(context.Background())

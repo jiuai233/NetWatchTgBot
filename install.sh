@@ -1,12 +1,12 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # NetWatch Agent 一键安装与自动注册脚本
 # 用法示例：
 #   REPO="jiuai233/NetWatchTgBot" MASTER="http://MASTER_IP:18080/api/v1/report" \
 #   TOKEN="your_agent_token" NODE_ID="vps-jp" NODE_NAME="日本东京" \
 #   PORT="443" PROTO="VLESS" QUOTA_GB="500" RESET_DAY="1" EXPIRE="2026-12-31" \
-#   bash install.sh
+#   sh install.sh
 
 REPO="${REPO:-jiuai233/NetWatchTgBot}"
 TAG="${TAG:-latest}"
@@ -15,6 +15,7 @@ TOKEN="${TOKEN:-}"
 NODE_ID="${NODE_ID:-$(hostname)}"
 NODE_NAME="${NODE_NAME:-$NODE_ID}"
 PORT="${PORT:-443}"
+WATCH_PORTS="${WATCH_PORTS:-$PORT}"
 PROBE_PORT="${PROBE_PORT:-0}"
 PROTO="${PROTO:-VLESS}"
 QUOTA_GB="${QUOTA_GB:-500}"
@@ -23,9 +24,9 @@ EXPIRE="${EXPIRE:-2026-12-31}"
 CLASH_API="${CLASH_API:-}"
 CLASH_SECRET="${CLASH_SECRET:-}"
 
-if [[ -z "$REPO" || -z "$MASTER" ]]; then
+if [ -z "$REPO" ] || [ -z "$MASTER" ]; then
   echo "缺少参数，需要提供 REPO 和 MASTER，例如："
-  echo "  REPO=user/NetWatchTgBot MASTER=http://1.2.3.4:18080/api/v1/report TOKEN=xxx NODE_ID=vps-new PORT=443 bash install.sh"
+  echo "  REPO=jiuai233/NetWatchTgBot MASTER=http://1.2.3.4:18080/api/v1/report TOKEN=xxx NODE_ID=vps-new PORT=443 sh install.sh"
   exit 1
 fi
 
@@ -37,7 +38,7 @@ case "$ARCH_RAW" in
 esac
 
 BIN_NAME="netwatch-agent-linux-${ARCH}"
-if [[ "$TAG" == "latest" ]]; then
+if [ "$TAG" = "latest" ]; then
   URL="https://github.com/${REPO}/releases/latest/download/${BIN_NAME}"
 else
   URL="https://github.com/${REPO}/releases/download/${TAG}/${BIN_NAME}"
@@ -57,7 +58,7 @@ local_collector:
   enabled: true
   node_id: "${NODE_ID}"
   interface: ""
-  watch_ports: [${PORT}]
+  watch_ports: [${WATCH_PORTS}]
   clash_api_url: "${CLASH_API}"
   clash_secret: "${CLASH_SECRET}"
   interval_sec: 30

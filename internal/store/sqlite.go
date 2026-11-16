@@ -109,6 +109,11 @@ func (s *Store) initSchema() error {
 			expire_date TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS alert_chats (
+			chat_id INTEGER PRIMARY KEY,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			updated_at INTEGER NOT NULL
+		);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -476,4 +481,59 @@ func (s *Store) GetCycleCalibration(nodeID, cycleStart string) int64 {
 	var b int64
 	_ = s.db.QueryRow(`SELECT base_bytes FROM cycle_calibration WHERE node_id=? AND cycle_start=?`, nodeID, cycleStart).Scan(&b)
 	return b
+}
+
+func (s *Store) EnsureAlertChat(chatID int64) {
+	_, _ = s.db.Exec(`INSERT OR IGNORE INTO alert_chats(chat_id, enabled, updated_at) VALUES(?, 1, ?)`, chatID, time.Now().Unix())
+}
+
+func (s *Store) SetAlertEnabled(chatID int64, enabled bool) error {
+	val := 0
+	if enabled {
+		val = 1
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO alert_chats(chat_id, enabled, updated_at) VALUES(?,?,?)
+		ON CONFLICT(chat_id) DO UPDATE SET enabled=excluded.enabled, updated_at=excluded.updated_at
+	`, chatID, val, time.Now().Unix())
+	return err
+}
+
+func (s *Store) IsAlertEnabled(chatID int64) bool {
+	var v int
+	err := s.db.QueryRow(`SELECT enabled FROM alert_chats WHERE chat_id=?`, chatID).Scan(&v)
+	if err != nil {
+		return true
+	}
+	return v == 1
+}
+
+func (s *Store) ListAlertChats() ([]int64, error) {
+	rows, err := s.db.Query(`SELECT chat_id FROM alert_chats WHERE enabled=1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err == nil {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) GetLatestSample(nodeID string) (model.ResourceSample, bool) {
+	var item model.ResourceSample
+	var ts int64
+	err := s.db.QueryRow(`
+		SELECT ts, cpu_pct, mem_pct, disk_pct, rx_bps, tx_bps, avg_latency_ms, active_conns
+		FROM resource_samples WHERE node_id=? ORDER BY ts DESC LIMIT 1
+	`, nodeID).Scan(&ts, &item.CPUPct, &item.MemPct, &item.DiskPct, &item.RxBps, &item.TxBps, &item.AvgLatencyMs, &item.ActiveConns)
+	if err != nil {
+		return item, false
+	}
+	item.Timestamp = time.Unix(ts, 0)
+	return item, true
 }
