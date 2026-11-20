@@ -13,20 +13,22 @@
 在本地执行以下命令，生成面向 Linux `amd64` 与 `arm64` 的全部二进制产物到 `dist/` 目录：
 
 ```bash
+VERSION=v0.2.0
 mkdir -p dist
 for arch in amd64 arm64; do
-  GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -ldflags="-s -w" -o "dist/netwatch-master-linux-${arch}" ./cmd/netwatch
-  GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -ldflags="-s -w" -o "dist/netwatch-agent-linux-${arch}" ./cmd/netwatch-agent
+  GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o "dist/netwatch-master-linux-${arch}" ./cmd/netwatch
+  GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o "dist/netwatch-agent-linux-${arch}" ./cmd/netwatch-agent
 done
 cp install.sh dist/
+(cd dist && sha256sum netwatch-* > checksums.txt 2>/dev/null || shasum -a 256 netwatch-* > checksums.txt)
 ```
 
 使用 GitHub CLI 创建标签并上传 Release（或在 GitHub 网页端手动新建 Release 并上传 `dist/` 中的文件）：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
-gh release create v0.1.0 dist/* --title "v0.1.0" --notes "Linux amd64/arm64 二进制包"
+git tag "${VERSION}"
+git push origin "${VERSION}"
+gh release create "${VERSION}" dist/* --title "${VERSION}" --notes "Linux amd64/arm64 二进制包"
 ```
 
 ---
@@ -87,3 +89,4 @@ bash /tmp/nw-install.sh
 - `/clients`：按 VPS 分组查看当前连入 IP、归属地与累计流量消耗
 - `/gd`：立即通过 Globalping 广州/深圳探针检测各节点延迟与连通性
 - `/set <节点ID> <已用GB>`：校准指定节点当前计费周期的已用流量（例如 `/set vps-154 320.4`）
+- `/retire <节点ID>`：下线节点，停止接收该节点上报和执行探测，保留历史数据（例如 `/retire vps-216`）。共用 Agent 密钥不能阻止持有者冒用其他节点 ID。

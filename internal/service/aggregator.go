@@ -32,7 +32,7 @@ func (a *Aggregator) SyncConfigNodes() error {
 
 func (a *Aggregator) ActiveNodes() []model.NodeDef {
 	list, err := a.store.ListNodes()
-	if err == nil && len(list) > 0 {
+	if err == nil {
 		return list
 	}
 	return a.cfg.Nodes

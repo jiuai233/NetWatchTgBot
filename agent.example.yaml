@@ -10,6 +10,9 @@ local_collector:
   clash_api_url: ""
   clash_secret: ""
   interval_sec: 30
+  auto_update: false
+  update_repo: "jiuai233/NetWatchTgBot"
+  update_proxy: ""
   register:
     id: "vps-new"
     name: "新节点"

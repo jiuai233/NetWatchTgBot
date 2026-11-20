@@ -9,15 +9,17 @@ import (
 )
 
 type Config struct {
-	Mode            string          `yaml:"mode"` // "master" or "agent"
-	ListenAddr      string          `yaml:"listen_addr"`
-	AgentToken      string          `yaml:"agent_token"`
-	DBPath          string          `yaml:"db_path"`
-	MasterURL       string          `yaml:"master_url"`       // used in agent mode
-	GlobalpingToken string          `yaml:"globalping_token"` // optional
-	Telegram        TGConfig        `yaml:"telegram"`
-	LocalCollector  LocalCollect    `yaml:"local_collector"`
-	Nodes           []model.NodeDef `yaml:"nodes"`
+	Mode            string                          `yaml:"mode"` // "master" or "agent"
+	ListenAddr      string                          `yaml:"listen_addr"`
+	AgentToken      string                          `yaml:"agent_token"`
+	DBPath          string                          `yaml:"db_path"`
+	MasterURL       string                          `yaml:"master_url"`       // used in agent mode
+	GlobalpingToken string                          `yaml:"globalping_token"` // optional
+	Telegram        TGConfig                        `yaml:"telegram"`
+	LocalCollector  LocalCollect                    `yaml:"local_collector"`
+	Nodes           []model.NodeDef                 `yaml:"nodes"`
+	AgentDefaults   *model.AgentSyncConfig          `yaml:"agent_defaults,omitempty"`
+	AgentOverrides  map[string]model.AgentSyncConfig `yaml:"agent_overrides,omitempty"`
 }
 
 type TGConfig struct {
@@ -26,14 +28,18 @@ type TGConfig struct {
 }
 
 type LocalCollect struct {
-	Enabled     bool           `yaml:"enabled"`
-	NodeID      string         `yaml:"node_id"`
-	Interface   string         `yaml:"interface"`
-	WatchPorts  []int          `yaml:"watch_ports"`
-	ClashAPIURL string         `yaml:"clash_api_url"`
-	ClashSecret string         `yaml:"clash_secret"`
-	IntervalSec int            `yaml:"interval_sec"`
-	Register    *model.NodeDef `yaml:"register,omitempty"` // sent by agent for auto-registration
+	Enabled      bool              `yaml:"enabled"`
+	NodeID       string            `yaml:"node_id"`
+	Interface    string            `yaml:"interface"`
+	WatchPorts   []int             `yaml:"watch_ports"`
+	ClashAPIURL  string            `yaml:"clash_api_url"`
+	ClashSecret  string            `yaml:"clash_secret"`
+	IntervalSec  int               `yaml:"interval_sec"`
+	LocalTargets []model.TargetDef `yaml:"local_targets,omitempty"`
+	AutoUpdate   bool              `yaml:"auto_update,omitempty"`
+	UpdateRepo   string            `yaml:"update_repo,omitempty"`
+	UpdateProxy  string            `yaml:"update_proxy,omitempty"`
+	Register     *model.NodeDef    `yaml:"register,omitempty"` // sent by agent for auto-registration
 }
 
 func Load(path string) (*Config, error) {

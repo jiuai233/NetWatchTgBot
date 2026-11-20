@@ -23,6 +23,9 @@ RESET_DAY="${RESET_DAY:-1}"
 EXPIRE="${EXPIRE:-2026-12-31}"
 CLASH_API="${CLASH_API:-}"
 CLASH_SECRET="${CLASH_SECRET:-}"
+AUTO_UPDATE="${AUTO_UPDATE:-false}"
+UPDATE_REPO="${UPDATE_REPO:-$REPO}"
+UPDATE_PROXY="${UPDATE_PROXY:-}"
 
 if [ -z "$REPO" ] || [ -z "$MASTER" ]; then
   echo "缺少参数，需要提供 REPO 和 MASTER，例如："
@@ -62,6 +65,9 @@ local_collector:
   clash_api_url: "${CLASH_API}"
   clash_secret: "${CLASH_SECRET}"
   interval_sec: 30
+  auto_update: ${AUTO_UPDATE}
+  update_repo: "${UPDATE_REPO}"
+  update_proxy: "${UPDATE_PROXY}"
   register:
     id: "${NODE_ID}"
     name: "${NODE_NAME}"
