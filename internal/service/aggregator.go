@@ -96,8 +96,9 @@ func (a *Aggregator) BuildOverview(period string) (model.OverviewView, error) {
 			online = now.Sub(latest.Timestamp) < 3*time.Minute
 		}
 
-		gdLat, gdLoss := calcGDProbeAvg(probes)
-		score, hLabel, hNote := calcHealth(online, latest.CPUPct, latest.MemPct, latest.DiskPct, gdLat, gdLoss)
+		gdLat, gdLoss, gdTotal, gdOK := calcGDProbeAvg(probes)
+		proxyState := calcProxyState(gdLat, gdLoss, gdTotal, gdOK)
+		score, hLabel, hNote := calcHealth(online, proxyState, latest.CPUPct, latest.MemPct, latest.DiskPct, gdLat, gdLoss)
 		quotaBytes := nd.QuotaGB * 1024 * 1024 * 1024
 
 		nodes = append(nodes, model.NodeSummary{
@@ -107,6 +108,7 @@ func (a *Aggregator) BuildOverview(period string) (model.OverviewView, error) {
 			Port:         nd.Port,
 			Protocol:     nd.Protocol,
 			Online:       online,
+			ProxyState:   proxyState,
 			HealthScore:  score,
 			HealthLabel:  hLabel,
 			HealthNote:   hNote,
@@ -115,6 +117,8 @@ func (a *Aggregator) BuildOverview(period string) (model.OverviewView, error) {
 			DiskPct:      latest.DiskPct,
 			GDLatencyMs:  gdLat,
 			GDLossPct:    gdLoss,
+			GDProbeCount: gdTotal,
+			GDOkCount:    gdOK,
 			RxBps:        latest.RxBps,
 			TxBps:        latest.TxBps,
 			ActiveConns:  latest.ActiveConns,
@@ -211,8 +215,9 @@ func (a *Aggregator) BuildNodeDetail(nodeID, window string) (model.NodeDetailVie
 		latest = hist[len(hist)-1]
 		online = now.Sub(latest.Timestamp) < 3*time.Minute
 	}
-	gdLat, gdLoss := calcGDProbeAvg(probes)
-	score, hLabel, hNote := calcHealth(online, latest.CPUPct, latest.MemPct, latest.DiskPct, gdLat, gdLoss)
+	gdLat, gdLoss, gdTotal, gdOK := calcGDProbeAvg(probes)
+	proxyState := calcProxyState(gdLat, gdLoss, gdTotal, gdOK)
+	score, hLabel, hNote := calcHealth(online, proxyState, latest.CPUPct, latest.MemPct, latest.DiskPct, gdLat, gdLoss)
 	cycStart := billingCycleStart(now, target.ResetDay)
 	crx, ctx, _ := a.store.GetTrafficSince(target.ID, cycStart)
 	calBase := a.store.GetCycleCalibration(target.ID, cycStart)
@@ -224,6 +229,7 @@ func (a *Aggregator) BuildNodeDetail(nodeID, window string) (model.NodeDetailVie
 		Port:         target.Port,
 		Protocol:     target.Protocol,
 		Online:       online,
+		ProxyState:   proxyState,
 		HealthScore:  score,
 		HealthLabel:  hLabel,
 		HealthNote:   hNote,
@@ -232,6 +238,8 @@ func (a *Aggregator) BuildNodeDetail(nodeID, window string) (model.NodeDetailVie
 		DiskPct:      latest.DiskPct,
 		GDLatencyMs:  gdLat,
 		GDLossPct:    gdLoss,
+		GDProbeCount: gdTotal,
+		GDOkCount:    gdOK,
 		RxBps:        latest.RxBps,
 		TxBps:        latest.TxBps,
 		ActiveConns:  latest.ActiveConns,
@@ -371,34 +379,57 @@ func billingCycleProgress(now time.Time, resetDay int) float64 {
 	return math.Max(0, math.Min(100, pct))
 }
 
-func calcGDProbeAvg(probes []model.ProbeEntry) (avgLat, avgLoss float64) {
+func calcGDProbeAvg(probes []model.ProbeEntry) (avgLat, avgLoss float64, cnt, okCnt int) {
 	var sumLat, sumLoss float64
-	var cnt, okCnt int
 	for _, p := range probes {
 		if p.Tag == "gd" {
 			cnt++
-			sumLoss += p.LossPct
-			if p.LatencyMs > 0 {
+			loss := p.LossPct
+			if p.Status == "down" || p.LatencyMs <= 0 {
+				if loss < 100 {
+					loss = 100
+				}
+			} else {
 				sumLat += p.LatencyMs
 				okCnt++
 			}
+			sumLoss += loss
 		}
 	}
 	if cnt == 0 {
-		return 0, 0
+		return 0, 0, 0, 0
 	}
 	if okCnt > 0 {
 		avgLat = sumLat / float64(okCnt)
 	}
-	return avgLat, sumLoss / float64(cnt)
+	return avgLat, sumLoss / float64(cnt), cnt, okCnt
 }
 
-func calcHealth(online bool, cpu, mem, disk, gdLat, gdLoss float64) (int, string, string) {
+func calcProxyState(gdLat, gdLoss float64, gdTotal, gdOK int) string {
+	if gdTotal == 0 {
+		return "unknown"
+	}
+	if gdOK == 0 {
+		return "down"
+	}
+	if gdLoss > 10 || gdLat > 220 {
+		return "slow"
+	}
+	return "ok"
+}
+
+func calcHealth(online bool, proxyState string, cpu, mem, disk, gdLat, gdLoss float64) (int, string, string) {
 	if !online {
-		return 0, "离线", "节点心跳超时"
+		return 0, "离线", "Agent 心跳超时"
+	}
+	if proxyState == "down" {
+		return 20, "不可用", "Agent 在线，但广东探测全阻断"
 	}
 	score := 100.0
 	note := "运行状态良好"
+	if proxyState == "unknown" {
+		note = "Agent 在线，广东延迟待探测"
+	}
 	if gdLat > 200 {
 		score -= 10
 		note = "网络延迟偏高"

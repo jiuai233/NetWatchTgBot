@@ -340,10 +340,12 @@ func RenderOverviewPNG(v model.OverviewView, outPath string) error {
 		dc.Stroke()
 
 		dotCol := colGreen
-		if !n.Online {
+		if !n.Online || n.ProxyState == "down" {
 			dotCol = colRed
-		} else if n.GDLatencyMs > 220 {
+		} else if n.ProxyState == "slow" || n.GDLatencyMs > 220 || n.GDLossPct > 10 {
 			dotCol = colAmber
+		} else if n.ProxyState == "unknown" || (n.ProxyState == "" && n.GDLatencyMs <= 0) {
+			dotCol = textMuted
 		}
 		dc.SetColor(dotCol)
 		dc.DrawCircle(pad+26, y-4, 4.5)
@@ -370,17 +372,20 @@ func RenderOverviewPNG(v model.OverviewView, outPath string) error {
 
 		if !n.Online {
 			dc.SetColor(colRed)
-			dc.DrawString("离线", pad+565, y)
+			dc.DrawString("Agent 离线", pad+565, y)
+		} else if n.ProxyState == "down" {
+			dc.SetColor(colRed)
+			dc.DrawString("全阻断", pad+565, y)
 		} else if n.GDLatencyMs <= 0 {
 			dc.SetColor(textMuted)
-			dc.DrawString("--", pad+565, y)
+			dc.DrawString("待测", pad+565, y)
 		} else {
-			if n.GDLatencyMs < 110 {
-				dc.SetColor(colGreen)
-			} else if n.GDLatencyMs < 200 {
+			if n.GDLossPct > 10 || n.GDLatencyMs >= 200 {
+				dc.SetColor(colRed)
+			} else if n.GDLatencyMs >= 110 {
 				dc.SetColor(colAmber)
 			} else {
-				dc.SetColor(colRed)
+				dc.SetColor(colGreen)
 			}
 			dc.DrawString(fmt.Sprintf("%.0f ms", n.GDLatencyMs), pad+565, y)
 		}
@@ -470,8 +475,12 @@ func RenderNodeDetailPNG(v model.NodeDetailView, outPath string) error {
 
 	// Title row
 	dot := colGreen
-	if !v.Node.Online {
+	if !v.Node.Online || v.Node.ProxyState == "down" {
 		dot = colRed
+	} else if v.Node.ProxyState == "slow" || v.Node.GDLatencyMs > 220 || v.Node.GDLossPct > 10 {
+		dot = colAmber
+	} else if v.Node.ProxyState == "unknown" || (v.Node.ProxyState == "" && v.Node.GDLatencyMs <= 0) {
+		dot = textMuted
 	}
 	dc.SetColor(dot)
 	dc.DrawCircle(pad+8, pad+15, 6)
@@ -514,8 +523,12 @@ func RenderNodeDetailPNG(v model.NodeDetailView, outPath string) error {
 		{"硬盘", fmt.Sprintf("%.0f%%", v.Node.DiskPct)},
 		{"广东延迟", fmt.Sprintf("%.0f ms", v.Node.GDLatencyMs)},
 	}
-	if v.Node.GDLatencyMs <= 0 {
-		kpis[3].Val = "--"
+	if !v.Node.Online {
+		kpis[3].Val = "Agent 离线"
+	} else if v.Node.ProxyState == "down" {
+		kpis[3].Val = "全阻断"
+	} else if v.Node.GDLatencyMs <= 0 {
+		kpis[3].Val = "待测"
 	}
 	for i, k := range kpis {
 		bx := pad + float64(i)*(boxW+12)

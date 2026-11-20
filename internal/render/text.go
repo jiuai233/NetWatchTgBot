@@ -27,17 +27,7 @@ func RenderOverviewText(v model.OverviewView) string {
 	}
 
 	for _, n := range v.Nodes {
-		icon := "🟢"
-		lat := "--"
-		if !n.Online {
-			icon = "🔴"
-			lat = "离线"
-		} else if n.GDLatencyMs > 0 {
-			if n.GDLatencyMs > 220 {
-				icon = "🟡"
-			}
-			lat = fmt.Sprintf("%.0fms", n.GDLatencyMs)
-		}
+		icon, lat := nodeStatusBadge(n)
 
 		fmt.Fprintf(&sb, "━━ <b>%s</b> (<code>%s</code>) ━━\n", esc(n.Name), esc(n.Host))
 		fmt.Fprintf(&sb, "%s 广东 <code>%s</code> · %d连接 · 实时 <code>%s</code>\n",
@@ -89,16 +79,37 @@ func RenderOverviewText(v model.OverviewView) string {
 	return sb.String()
 }
 
+func nodeStatusBadge(n model.NodeSummary) (icon, lat string) {
+	if !n.Online {
+		return "🔴", "Agent 离线"
+	}
+	switch n.ProxyState {
+	case "down":
+		return "🔴", "不可用 (Agent在线·广东阻断)"
+	case "slow":
+		if n.GDLossPct > 10 {
+			return "🟡", fmt.Sprintf("%.0fms (丢包%.0f%%)", n.GDLatencyMs, n.GDLossPct)
+		}
+		return "🟡", fmt.Sprintf("%.0fms", n.GDLatencyMs)
+	case "ok":
+		return "🟢", fmt.Sprintf("%.0fms", n.GDLatencyMs)
+	default:
+		if n.GDProbeCount > 0 && n.GDOkCount == 0 {
+			return "🔴", "不可用 (Agent在线·广东阻断)"
+		}
+		if n.GDLatencyMs > 0 {
+			if n.GDLatencyMs > 220 || n.GDLossPct > 10 {
+				return "🟡", fmt.Sprintf("%.0fms", n.GDLatencyMs)
+			}
+			return "🟢", fmt.Sprintf("%.0fms", n.GDLatencyMs)
+		}
+		return "⚪", "待测 (仅Agent在线)"
+	}
+}
+
 func RenderNodeDetailText(v model.NodeDetailView) string {
 	var sb strings.Builder
-	icon := "🟢"
-	if !v.Node.Online {
-		icon = "🔴"
-	}
-	lat := "--"
-	if v.Node.GDLatencyMs > 0 {
-		lat = fmt.Sprintf("%.0f ms", v.Node.GDLatencyMs)
-	}
+	icon, lat := nodeStatusBadge(v.Node)
 
 	fmt.Fprintf(&sb, "%s <b>%s</b>（<code>%s:%d</code> · %s）\n", icon, esc(v.Node.Name), esc(v.Node.Host), v.Node.Port, esc(v.Node.Protocol))
 	fmt.Fprintf(&sb, "健康度：<b>%d</b> · %s（%s）\n", v.Node.HealthScore, esc(v.Node.HealthLabel), esc(v.Node.HealthNote))
