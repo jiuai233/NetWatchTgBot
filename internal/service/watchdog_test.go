@@ -105,3 +105,35 @@ func TestWatchdogExpiryReminderAndAutoRenew(t *testing.T) {
 		t.Fatalf("expected preserved expire_date 2026-12-23, got: %+v err=%v", nodes, err)
 	}
 }
+
+func TestBuildOverviewAndWatchdogDetectBlockedProxy(t *testing.T) {
+	w, st, _ := newTestWatchdog(t)
+	nd := model.NodeDef{ID: "vps-144", Name: "144", Host: "", Port: 20004, Protocol: "VLESS"}
+	if err := st.UpsertNode(nd, false); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := st.IngestReport(model.AgentReport{NodeID: "vps-144", Timestamp: now, CPUPct: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveProbes("vps-144", []model.ProbeEntry{
+		{Name: "广东广州 · 电信", Tag: "gd", LatencyMs: 0, LossPct: 100, Status: "down", UpdatedAt: now},
+		{Name: "广东深圳 · 移动", Tag: "gd", LatencyMs: 0, LossPct: 0, Status: "down", UpdatedAt: now},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ov, err := w.agg.BuildOverview("month")
+	if err != nil || len(ov.Nodes) != 1 {
+		t.Fatalf("BuildOverview err=%v nodes=%v", err, ov.Nodes)
+	}
+	n := ov.Nodes[0]
+	if !n.Online || n.ProxyState != "down" || n.HealthLabel != "不可用" {
+		t.Fatalf("expected Online=true ProxyState=down 不可用, got: %+v", n)
+	}
+
+	reason := w.inspectNode(nd, now)
+	if !strings.Contains(reason, "广东探测全超时/阻断") {
+		t.Fatalf("expected watchdog issue for blocked GD probes, got: %q", reason)
+	}
+}

@@ -271,6 +271,26 @@ func (w *Watchdog) inspectNode(nd model.NodeDef, now time.Time) string {
 		}
 	}
 
+	// 3. Check Guangdong Globalping probe reachability (distinguish Agent online vs proxy reachable from CN)
+	if probes, err := w.store.GetProbes(nd.ID); err == nil {
+		gdTotal, gdOK := 0, 0
+		var newest time.Time
+		for _, p := range probes {
+			if p.Tag == "gd" {
+				gdTotal++
+				if p.Status != "down" && p.LatencyMs > 0 {
+					gdOK++
+				}
+				if p.UpdatedAt.After(newest) {
+					newest = p.UpdatedAt
+				}
+			}
+		}
+		if gdTotal >= 2 && gdOK == 0 && !newest.IsZero() && now.Sub(newest) <= 90*time.Minute {
+			issues = append(issues, "Agent 在线，但广东探测全超时/阻断")
+		}
+	}
+
 	return strings.Join(issues, "；")
 }
 

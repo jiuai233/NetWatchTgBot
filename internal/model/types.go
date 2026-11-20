@@ -62,6 +62,7 @@ type NodeSummary struct {
 	Port          int
 	Protocol      string // e.g. "Hysteria2", "VLESS-Reality"
 	Online        bool
+	ProxyState    string // "ok" | "slow" | "down" | "unknown"
 	HealthScore   int
 	HealthLabel   string
 	HealthNote    string
@@ -70,6 +71,8 @@ type NodeSummary struct {
 	DiskPct       float64
 	GDLatencyMs   float64 // avg Guangdong latency
 	GDLossPct     float64
+	GDProbeCount  int
+	GDOkCount     int
 	RxBps         float64
 	TxBps         float64
 	ActiveConns   int

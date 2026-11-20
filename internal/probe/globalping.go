@@ -148,6 +148,7 @@ func MeasureGuangdong(ctx context.Context, target string, port int, probePort in
 		if r.Result.Status != "finished" || avg <= 0 || loss >= 100 {
 			status = "down"
 			avg = 0
+			loss = 100
 		} else if avg > 220 || loss > 10 {
 			status = "slow"
 		}
