@@ -2,6 +2,7 @@ package collector
 
 import (
 	"bufio"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -27,11 +28,7 @@ type Options struct {
 	LocalTargets []Target // optional local probes e.g. Cloudflare DNS, Google DNS
 }
 
-type Target struct {
-	Name string
-	Tag  string
-	Addr string
-}
+type Target = model.TargetDef
 
 type Collector struct {
 	opts      Options
@@ -42,6 +39,7 @@ type Collector struct {
 	lastNetAt time.Time
 	lastIP    map[string]ipSnap
 	client    *http.Client
+	probeWin  *probe.RollingWindow
 }
 
 type ipSnap struct {
@@ -62,9 +60,58 @@ type netBytes struct {
 
 func New(opts Options) *Collector {
 	return &Collector{
-		opts:   opts,
-		lastIP: make(map[string]ipSnap),
-		client: &http.Client{Timeout: 3 * time.Second},
+		opts:     opts,
+		lastIP:   make(map[string]ipSnap),
+		client:   &http.Client{Timeout: 3 * time.Second},
+		probeWin: probe.NewRollingWindow(),
+	}
+}
+
+func (c *Collector) UpdateRuntime(watchPorts []int, targets []Target) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if watchPorts != nil {
+		cp := make([]int, len(watchPorts))
+		copy(cp, watchPorts)
+		c.opts.WatchPorts = cp
+	}
+	if targets != nil {
+		cp := make([]Target, len(targets))
+		copy(cp, targets)
+		c.opts.LocalTargets = cp
+	}
+}
+
+func (c *Collector) currentTargets() []Target {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cp := make([]Target, len(c.opts.LocalTargets))
+	copy(cp, c.opts.LocalTargets)
+	return cp
+}
+
+func (c *Collector) currentWatchPorts() []int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cp := make([]int, len(c.opts.WatchPorts))
+	copy(cp, c.opts.WatchPorts)
+	return cp
+}
+
+func (c *Collector) StartProbeLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 20 * time.Second
+	}
+	c.probeWin.ProbeAll(c.currentTargets(), time.Now())
+	tk := time.NewTicker(interval)
+	defer tk.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-tk.C:
+			c.probeWin.ProbeAll(c.currentTargets(), now)
+		}
 	}
 }
 
@@ -92,8 +139,11 @@ func (c *Collector) Collect(withProbes bool) model.AgentReport {
 
 	var probes []model.ProbeEntry
 	if withProbes {
-		for _, t := range c.opts.LocalTargets {
-			probes = append(probes, probe.TCPing(t.Name, t.Tag, t.Addr))
+		targets := c.currentTargets()
+		probes = c.probeWin.Snapshot(targets, now)
+		if len(probes) == 0 && len(targets) > 0 {
+			c.probeWin.ProbeAll(targets, now)
+			probes = c.probeWin.Snapshot(targets, now)
 		}
 	}
 
@@ -129,9 +179,10 @@ func (c *Collector) collectClients() ([]model.ClientSample, int) {
 	}
 
 	// 2) Also inspect /proc/net/tcp* & udp* for watched ports (covers Hysteria2 UDP or when Clash API lacks inbound)
-	if len(c.opts.WatchPorts) > 0 {
-		portSet := make(map[int]bool, len(c.opts.WatchPorts))
-		for _, p := range c.opts.WatchPorts {
+	watchPorts := c.currentWatchPorts()
+	if len(watchPorts) > 0 {
+		portSet := make(map[int]bool, len(watchPorts))
+		for _, p := range watchPorts {
 			portSet[p] = true
 		}
 		procCounts := readProcSocketPeers(portSet)

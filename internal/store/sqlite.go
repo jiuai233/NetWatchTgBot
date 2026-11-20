@@ -2,13 +2,17 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"netwatch/internal/model"
 
 	_ "modernc.org/sqlite"
 )
+
+var ErrNodeRetired = errors.New("node retired")
 
 type Store struct {
 	db *sql.DB
@@ -109,10 +113,21 @@ func (s *Store) initSchema() error {
 			expire_date TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS retired_nodes (
+			node_id TEXT PRIMARY KEY,
+			retired_at INTEGER NOT NULL
+		);`,
 		`CREATE TABLE IF NOT EXISTS alert_chats (
 			chat_id INTEGER PRIMARY KEY,
 			enabled INTEGER NOT NULL DEFAULT 1,
 			updated_at INTEGER NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS alert_events (
+			node_id TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			cycle_key TEXT NOT NULL,
+			fired_at INTEGER NOT NULL,
+			PRIMARY KEY (node_id, kind, cycle_key)
 		);`,
 	}
 	for _, stmt := range stmts {
@@ -120,13 +135,21 @@ func (s *Store) initSchema() error {
 			return fmt.Errorf("init schema failed: %w", err)
 		}
 	}
+	for _, ddl := range []string{
+		`ALTER TABLE nodes ADD COLUMN auto_renew INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE nodes ADD COLUMN billing_cycle TEXT NOT NULL DEFAULT '';`,
+	} {
+		if _, err := s.db.Exec(ddl); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("migrate schema failed: %w", err)
+		}
+	}
 	return nil
 }
 
 // applyMonotonicDelta calculates non-negative traffic delta even if OS/process counters reset after reboot.
 func applyMonotonicDelta(tx *sql.Tx, scope, key string, curRx, curTx int64, now int64) (int64, int64, error) {
-	var lastRx, lastTx int64
-	err := tx.QueryRow(`SELECT last_rx, last_tx FROM counter_state WHERE scope=? AND key=?`, scope, key).Scan(&lastRx, &lastTx)
+	var lastRx, lastTx, lastUpdated int64
+	err := tx.QueryRow(`SELECT last_rx, last_tx, updated_at FROM counter_state WHERE scope=? AND key=?`, scope, key).Scan(&lastRx, &lastTx, &lastUpdated)
 	if err == sql.ErrNoRows {
 		// First time seeing this counter: store baseline without adding historical boot traffic.
 		_, err = tx.Exec(`INSERT INTO counter_state(scope, key, last_rx, last_tx, updated_at) VALUES(?,?,?,?,?)`, scope, key, curRx, curTx, now)
@@ -134,6 +157,10 @@ func applyMonotonicDelta(tx *sql.Tx, scope, key string, curRx, curTx int64, now 
 	}
 	if err != nil {
 		return 0, 0, err
+	}
+	// Guard against out-of-order delayed backfill samples corrupting monotonic state.
+	if lastUpdated > 0 && now < lastUpdated {
+		return 0, 0, nil
 	}
 
 	var deltaRx, deltaTx int64
@@ -165,6 +192,14 @@ func (s *Store) IngestReport(r model.AgentReport) error {
 		return err
 	}
 	defer tx.Rollback()
+
+	var retired int
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM retired_nodes WHERE node_id=?)`, r.NodeID).Scan(&retired); err != nil {
+		return err
+	}
+	if retired != 0 {
+		return ErrNodeRetired
+	}
 
 	if r.NetRxTotal > 0 || r.NetTxTotal > 0 {
 		dRx, dTx, err := applyMonotonicDelta(tx, "node_net", r.NodeID, r.NetRxTotal, r.NetTxTotal, now)
@@ -280,7 +315,7 @@ func (s *Store) GetDailyTraffic(nodeID string, days int) ([]model.DailyTraffic, 
 	if nodeID == "" {
 		rows, err = s.db.Query(`
 			SELECT date, SUM(rx_bytes), SUM(tx_bytes)
-			FROM daily_traffic WHERE date >= ?
+			FROM daily_traffic WHERE date >= ? AND node_id NOT IN (SELECT node_id FROM retired_nodes)
 			GROUP BY date ORDER BY date ASC`, startDate)
 	} else {
 		rows, err = s.db.Query(`
@@ -329,7 +364,7 @@ func (s *Store) GetResourceSamples(nodeID string, since time.Time) ([]model.Reso
 	if nodeID == "" {
 		rows, err = s.db.Query(`
 			SELECT ts, AVG(cpu_pct), AVG(mem_pct), AVG(disk_pct), SUM(rx_bps), SUM(tx_bps), AVG(avg_latency_ms), SUM(active_conns)
-			FROM resource_samples WHERE ts >= ?
+			FROM resource_samples WHERE ts >= ? AND node_id NOT IN (SELECT node_id FROM retired_nodes)
 			GROUP BY ts/60 ORDER BY ts ASC`, since.Unix())
 	} else {
 		rows, err = s.db.Query(`
@@ -380,7 +415,7 @@ func (s *Store) GetClients(nodeID string, limit int) ([]model.ClientIPStat, erro
 	if nodeID == "" {
 		rows, err = s.db.Query(`
 			SELECT node_id, ip, active_conns, rx_bps, tx_bps, total_rx, total_tx, last_seen
-			FROM client_ip_traffic
+			FROM client_ip_traffic WHERE node_id NOT IN (SELECT node_id FROM retired_nodes)
 			ORDER BY active_conns DESC, (total_rx+total_tx) DESC, last_seen DESC
 			LIMIT ?`, limit)
 	} else {
@@ -443,25 +478,70 @@ func (s *Store) UpsertNode(n model.NodeDef, overwrite bool) error {
 	if n.ResetDay <= 0 || n.ResetDay > 28 {
 		n.ResetDay = 1
 	}
+	autoRenew := 0
+	if n.AutoRenew {
+		autoRenew = 1
+	}
 	if overwrite {
+		// Preserve auto-renewed expire_date if DB already moved it forward past static config.
+		var curExpire string
+		if err := s.db.QueryRow(`SELECT expire_date FROM nodes WHERE id=?`, n.ID).Scan(&curExpire); err == nil && curExpire != "" && curExpire > n.ExpireDate {
+			n.ExpireDate = curExpire
+		}
 		_, err := s.db.Exec(`
-			INSERT INTO nodes(id, name, host, port, probe_port, protocol, quota_gb, reset_day, expire_date, created_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?)
+			INSERT INTO nodes(id, name, host, port, probe_port, protocol, quota_gb, reset_day, expire_date, auto_renew, billing_cycle, created_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET
 				name=excluded.name, host=excluded.host, port=excluded.port, probe_port=excluded.probe_port,
-				protocol=excluded.protocol, quota_gb=excluded.quota_gb, reset_day=excluded.reset_day, expire_date=excluded.expire_date
-		`, n.ID, n.Name, n.Host, n.Port, n.ProbePort, n.Protocol, n.QuotaGB, n.ResetDay, n.ExpireDate, time.Now().Unix())
+				protocol=excluded.protocol, quota_gb=excluded.quota_gb, reset_day=excluded.reset_day,
+				expire_date=excluded.expire_date, auto_renew=excluded.auto_renew, billing_cycle=excluded.billing_cycle
+		`, n.ID, n.Name, n.Host, n.Port, n.ProbePort, n.Protocol, n.QuotaGB, n.ResetDay, n.ExpireDate, autoRenew, n.BillingCycle, time.Now().Unix())
 		return err
 	}
 	_, err := s.db.Exec(`
-		INSERT OR IGNORE INTO nodes(id, name, host, port, probe_port, protocol, quota_gb, reset_day, expire_date, created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?)
-	`, n.ID, n.Name, n.Host, n.Port, n.ProbePort, n.Protocol, n.QuotaGB, n.ResetDay, n.ExpireDate, time.Now().Unix())
+		INSERT OR IGNORE INTO nodes(id, name, host, port, probe_port, protocol, quota_gb, reset_day, expire_date, auto_renew, billing_cycle, created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+	`, n.ID, n.Name, n.Host, n.Port, n.ProbePort, n.Protocol, n.QuotaGB, n.ResetDay, n.ExpireDate, autoRenew, n.BillingCycle, time.Now().Unix())
 	return err
 }
 
+func (s *Store) UpdateNodeExpireDate(nodeID, expireDate string) error {
+	_, err := s.db.Exec(`UPDATE nodes SET expire_date=? WHERE id=?`, expireDate, nodeID)
+	return err
+}
+
+func (s *Store) HasAlertEvent(nodeID, kind, cycleKey string) bool {
+	var exists int
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM alert_events WHERE node_id=? AND kind=? AND cycle_key=?)`, nodeID, kind, cycleKey).Scan(&exists)
+	return err == nil && exists == 1
+}
+
+func (s *Store) MarkAlertEvent(nodeID, kind, cycleKey string) error {
+	_, err := s.db.Exec(`
+		INSERT OR IGNORE INTO alert_events(node_id, kind, cycle_key, fired_at) VALUES(?,?,?,?)
+	`, nodeID, kind, cycleKey, time.Now().Unix())
+	return err
+}
+
+// RetireNode keeps historical records while rejecting further reports.
+func (s *Store) RetireNode(nodeID string) (bool, error) {
+	result, err := s.db.Exec(`INSERT OR IGNORE INTO retired_nodes(node_id, retired_at)
+   SELECT id, ? FROM nodes WHERE id=?`, time.Now().Unix(), nodeID)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n > 0, err
+}
+
+func (s *Store) IsNodeRetired(nodeID string) (bool, error) {
+	var retired bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM retired_nodes WHERE node_id=?)`, nodeID).Scan(&retired)
+	return retired, err
+}
+
 func (s *Store) ListNodes() ([]model.NodeDef, error) {
-	rows, err := s.db.Query(`SELECT id, name, host, port, probe_port, protocol, quota_gb, reset_day, expire_date FROM nodes ORDER BY created_at ASC, id ASC`)
+	rows, err := s.db.Query(`SELECT id, name, host, port, probe_port, protocol, quota_gb, reset_day, expire_date, auto_renew, billing_cycle FROM nodes WHERE id NOT IN (SELECT node_id FROM retired_nodes) ORDER BY created_at ASC, id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -469,9 +549,11 @@ func (s *Store) ListNodes() ([]model.NodeDef, error) {
 	var out []model.NodeDef
 	for rows.Next() {
 		var n model.NodeDef
-		if err := rows.Scan(&n.ID, &n.Name, &n.Host, &n.Port, &n.ProbePort, &n.Protocol, &n.QuotaGB, &n.ResetDay, &n.ExpireDate); err != nil {
+		var autoRenew int
+		if err := rows.Scan(&n.ID, &n.Name, &n.Host, &n.Port, &n.ProbePort, &n.Protocol, &n.QuotaGB, &n.ResetDay, &n.ExpireDate, &autoRenew, &n.BillingCycle); err != nil {
 			return nil, err
 		}
+		n.AutoRenew = autoRenew != 0
 		out = append(out, n)
 	}
 	return out, nil

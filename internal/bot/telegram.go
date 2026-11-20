@@ -129,6 +129,7 @@ func (b *Bot) registerMenu() {
 			{"command": "gd", "description": "📡 测广东三网延迟"},
 			{"command": "alert", "description": "🔔 开关节点异常告警"},
 			{"command": "chart", "description": "🖼 发送总览卡片图"},
+			{"command": "retire", "description": "下线节点：/retire 节点ID"},
 		},
 	})
 }
@@ -195,6 +196,21 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgMessage) {
 		} else {
 			b.sendText(msg.Chat.ID, "🔕 已关闭节点异常主动告警。")
 		}
+	case "/retire":
+		if len(cmd) != 2 {
+			b.sendText(msg.Chat.ID, "用法：<code>/retire 节点ID</code>（保留历史数据）")
+			return
+		}
+		changed, err := b.store.RetireNode(cmd[1])
+		if err != nil {
+			b.sendText(msg.Chat.ID, "下线失败: "+err.Error())
+			return
+		}
+		if !changed {
+			b.sendText(msg.Chat.ID, "节点不存在或已经下线。请使用完整节点 ID。")
+			return
+		}
+		b.sendText(msg.Chat.ID, "节点已下线，历史数据已保留。")
 	case "/set":
 		if len(cmd) < 3 {
 			b.sendText(msg.Chat.ID, "用法：<code>/set vps-154 320.4</code>（校准本周期已用 GB）")

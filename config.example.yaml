@@ -36,3 +36,19 @@ nodes:
     quota_gb: 800
     reset_day: 26
     expire_date: "2026-11-26"
+    auto_renew: true
+    billing_cycle: "monthly"
+
+# 可选：主控向所有 Agent 下发统一配置（Agent 下次心跳自动热更新）
+# agent_defaults:
+#   interval_sec: 30
+#   auto_update: true
+#   update_repo: "jiuai233/NetWatchTgBot"
+#   update_proxy: "" # 例如 https://ghfast.top/
+#   local_targets:
+#     - name: "Cloudflare DNS · intl"
+#       tag: "intl"
+#       addr: "1.1.1.1:443"
+#     - name: "Google DNS · intl"
+#       tag: "intl"
+#       addr: "8.8.8.8:443"

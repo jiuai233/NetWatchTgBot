@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -15,9 +15,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"netwatch/internal/agent"
 	"netwatch/internal/bot"
 	"netwatch/internal/collector"
 	"netwatch/internal/config"
@@ -27,6 +29,8 @@ import (
 	"netwatch/internal/service"
 	"netwatch/internal/store"
 )
+
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -43,6 +47,8 @@ func main() {
 		runAgent(os.Args[2:])
 	case "calibrate":
 		runCalibrate(os.Args[2:])
+	case "retire":
+		runRetire(os.Args[2:])
 	default:
 		fmt.Printf("unknown subcommand: %s\n", sub)
 		os.Exit(1)
@@ -226,6 +232,7 @@ func runMaster(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	var knownMu sync.Mutex
 	knownNodes := make(map[string]bool)
 	for _, nd := range agg.ActiveNodes() {
 		knownNodes[nd.ID] = true
@@ -247,6 +254,16 @@ func runMaster(args []string) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		retired, err := st.IsNodeRetired(rep.NodeID)
+		if err != nil {
+			http.Error(w, "node status unavailable", http.StatusInternalServerError)
+			return
+		}
+		if retired {
+			http.Error(w, "node retired", http.StatusForbidden)
+			return
+		}
+		knownMu.Lock()
 		if rep.NodeID != "" && !knownNodes[rep.NodeID] {
 			meta := model.NodeDef{ID: rep.NodeID, Name: rep.NodeID, ResetDay: 1}
 			if rep.NodeMeta != nil {
@@ -273,12 +290,25 @@ func runMaster(args []string) {
 				}
 			}
 		}
+		knownMu.Unlock()
 		if err := st.IngestReport(rep); err != nil {
+			if errors.Is(err, store.ErrNodeRetired) {
+				http.Error(w, "node retired", http.StatusForbidden)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		w.Header().Set("Content-Type", "application/json")
+		respPayload := model.ReportResponse{OK: true}
+		if syncCfg, md5Sum := config.ResolveAgentSyncConfig(cfg, rep.NodeID); syncCfg != nil && md5Sum != "" {
+			respPayload.ConfigMD5 = md5Sum
+			if r.Header.Get("X-Agent-Config-MD5") != md5Sum {
+				respPayload.AgentConfig = syncCfg
+			}
+		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ok":true}`))
+		_ = json.NewEncoder(w).Encode(respPayload)
 	})
 
 	srv := &http.Server{Addr: cfg.ListenAddr, Handler: mux}
@@ -330,17 +360,20 @@ func runMaster(args []string) {
 }
 
 func runLocalCollector(ctx context.Context, cfg *config.Config, st *store.Store) {
+	targets := cfg.LocalCollector.LocalTargets
+	if len(targets) == 0 {
+		targets = config.DefaultLocalTargets()
+	}
 	col := collector.New(collector.Options{
-		NodeID:      cfg.LocalCollector.NodeID,
-		Interface:   cfg.LocalCollector.Interface,
-		WatchPorts:  cfg.LocalCollector.WatchPorts,
-		ClashAPIURL: cfg.LocalCollector.ClashAPIURL,
-		ClashSecret: cfg.LocalCollector.ClashSecret,
-		LocalTargets: []collector.Target{
-			{Name: "Cloudflare DNS · intl", Tag: "intl", Addr: "1.1.1.1:443"},
-			{Name: "Google DNS · intl", Tag: "intl", Addr: "8.8.8.8:443"},
-		},
+		NodeID:       cfg.LocalCollector.NodeID,
+		Interface:    cfg.LocalCollector.Interface,
+		WatchPorts:   cfg.LocalCollector.WatchPorts,
+		ClashAPIURL:  cfg.LocalCollector.ClashAPIURL,
+		ClashSecret:  cfg.LocalCollector.ClashSecret,
+		LocalTargets: targets,
 	})
+	go col.StartProbeLoop(ctx, 20*time.Second)
+
 	// Warm up baseline CPU/net
 	_ = col.Collect(false)
 	time.Sleep(1 * time.Second)
@@ -355,7 +388,7 @@ func runLocalCollector(ctx context.Context, cfg *config.Config, st *store.Store)
 			return
 		case <-tk.C:
 			tickCount++
-			rep := col.Collect(tickCount%4 == 0)
+			rep := col.Collect(tickCount%2 == 0)
 			if err := st.IngestReport(rep); err != nil {
 				log.Printf("local ingest err: %v", err)
 			}
@@ -372,57 +405,11 @@ func runAgent(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	col := collector.New(collector.Options{
-		NodeID:      cfg.LocalCollector.NodeID,
-		Interface:   cfg.LocalCollector.Interface,
-		WatchPorts:  cfg.LocalCollector.WatchPorts,
-		ClashAPIURL: cfg.LocalCollector.ClashAPIURL,
-		ClashSecret: cfg.LocalCollector.ClashSecret,
-		LocalTargets: []collector.Target{
-			{Name: "Cloudflare DNS · intl", Tag: "intl", Addr: "1.1.1.1:443"},
-			{Name: "Google DNS · intl", Tag: "intl", Addr: "8.8.8.8:443"},
-		},
-	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	send := func(rep model.AgentReport) {
-		rep.NodeMeta = cfg.LocalCollector.Register
-		raw, _ := json.Marshal(rep)
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.MasterURL, bytes.NewReader(raw))
-		if err != nil {
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if cfg.AgentToken != "" {
-			req.Header.Set("X-Agent-Token", cfg.AgentToken)
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("agent report err: %v", err)
-			return
-		}
-		resp.Body.Close()
-	}
-
-	_ = col.Collect(false)
-	time.Sleep(1 * time.Second)
-	send(col.Collect(true))
-
-	tk := time.NewTicker(time.Duration(cfg.LocalCollector.IntervalSec) * time.Second)
-	defer tk.Stop()
-	tickCount := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tk.C:
-			tickCount++
-			send(col.Collect(tickCount%4 == 0))
-		}
-	}
+	agent.NewRunner(cfg, *cfgPath, version).Run(ctx)
 }
 
 func runCalibrate(args []string) {
@@ -470,4 +457,31 @@ func clientIPFromReq(r *http.Request) string {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+func runRetire(args []string) {
+	fs := flag.NewFlagSet("retire", flag.ExitOnError)
+	cfgPath := fs.String("config", "config.yaml", "path to config.yaml")
+	nodeID := fs.String("node", "", "exact node ID")
+	_ = fs.Parse(args)
+	if *nodeID == "" {
+		log.Fatal("node ID is required")
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	st, err := store.Open(cfg.DBPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer st.Close()
+	changed, err := st.RetireNode(*nodeID)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !changed {
+		log.Fatal("node not found or already retired")
+	}
+	fmt.Printf("节点 %s 已下线\n", *nodeID)
 }

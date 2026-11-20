@@ -42,15 +42,17 @@ type ClientIPStat struct {
 }
 
 type NodeDef struct {
-	ID         string `yaml:"id" json:"id"`
-	Name       string `yaml:"name" json:"name"`
-	Host       string `yaml:"host" json:"host"`
-	Port       int    `yaml:"port" json:"port"`
-	ProbePort  int    `yaml:"probe_port,omitempty" json:"probe_port,omitempty"` // optional TCP port for Globalping probe (e.g. 23333 for Hysteria2 node)
-	Protocol   string `yaml:"protocol" json:"protocol"`
-	QuotaGB    int64  `yaml:"quota_gb" json:"quota_gb"`
-	ResetDay   int    `yaml:"reset_day" json:"reset_day"`
-	ExpireDate string `yaml:"expire_date" json:"expire_date"`
+	ID           string `yaml:"id" json:"id"`
+	Name         string `yaml:"name" json:"name"`
+	Host         string `yaml:"host" json:"host"`
+	Port         int    `yaml:"port" json:"port"`
+	ProbePort    int    `yaml:"probe_port,omitempty" json:"probe_port,omitempty"` // optional TCP port for Globalping probe (e.g. 23333 for Hysteria2 node)
+	Protocol     string `yaml:"protocol" json:"protocol"`
+	QuotaGB      int64  `yaml:"quota_gb" json:"quota_gb"`
+	ResetDay     int    `yaml:"reset_day" json:"reset_day"`
+	ExpireDate   string `yaml:"expire_date" json:"expire_date"`
+	AutoRenew    bool   `yaml:"auto_renew,omitempty" json:"auto_renew,omitempty"`
+	BillingCycle string `yaml:"billing_cycle,omitempty" json:"billing_cycle,omitempty"` // "monthly" | "yearly"
 }
 
 type NodeSummary struct {
@@ -123,6 +125,28 @@ type AgentReport struct {
 	ActiveConns int            `json:"active_conns"`
 	Probes      []ProbeEntry   `json:"probes,omitempty"`
 	Clients     []ClientSample `json:"clients,omitempty"`
+}
+
+type TargetDef struct {
+	Name string `yaml:"name" json:"name"`
+	Tag  string `yaml:"tag" json:"tag"`
+	Addr string `yaml:"addr" json:"addr"`
+}
+
+type AgentSyncConfig struct {
+	IntervalSec   int         `yaml:"interval_sec,omitempty" json:"interval_sec,omitempty"`
+	WatchPorts    []int       `yaml:"watch_ports,omitempty" json:"watch_ports,omitempty"`
+	LocalTargets  []TargetDef `yaml:"local_targets,omitempty" json:"local_targets,omitempty"`
+	AutoUpdate    *bool       `yaml:"auto_update,omitempty" json:"auto_update,omitempty"`
+	TargetVersion string      `yaml:"target_version,omitempty" json:"target_version,omitempty"`
+	UpdateRepo    string      `yaml:"update_repo,omitempty" json:"update_repo,omitempty"`
+	UpdateProxy   *string     `yaml:"update_proxy,omitempty" json:"update_proxy,omitempty"`
+}
+
+type ReportResponse struct {
+	OK          bool             `json:"ok"`
+	ConfigMD5   string           `json:"config_md5,omitempty"`
+	AgentConfig *AgentSyncConfig `json:"agent_config,omitempty"`
 }
 
 type ClientSample struct {
