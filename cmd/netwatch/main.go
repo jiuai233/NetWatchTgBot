@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -15,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -232,85 +229,7 @@ func runMaster(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	var knownMu sync.Mutex
-	knownNodes := make(map[string]bool)
-	for _, nd := range agg.ActiveNodes() {
-		knownNodes[nd.ID] = true
-	}
-
-	// HTTP endpoint to receive Agent reports (auto-registers new nodes)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/report", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if cfg.AgentToken != "" && r.Header.Get("X-Agent-Token") != cfg.AgentToken {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		var rep model.AgentReport
-		if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		retired, err := st.IsNodeRetired(rep.NodeID)
-		if err != nil {
-			http.Error(w, "node status unavailable", http.StatusInternalServerError)
-			return
-		}
-		if retired {
-			http.Error(w, "node retired", http.StatusForbidden)
-			return
-		}
-		knownMu.Lock()
-		if rep.NodeID != "" && !knownNodes[rep.NodeID] {
-			meta := model.NodeDef{ID: rep.NodeID, Name: rep.NodeID, ResetDay: 1}
-			if rep.NodeMeta != nil {
-				meta = *rep.NodeMeta
-				if meta.ID == "" {
-					meta.ID = rep.NodeID
-				}
-			}
-			if meta.Host == "" {
-				meta.Host = clientIPFromReq(r)
-			}
-			if err := st.UpsertNode(meta, false); err == nil {
-				knownNodes[rep.NodeID] = true
-				log.Printf("auto-registered new node: %s (%s:%d)", meta.ID, meta.Host, meta.Port)
-				if meta.Host != "" {
-					go func(m model.NodeDef) {
-						pCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
-						res, err := probe.MeasureGuangdong(pCtx, m.Host, m.Port, m.ProbePort, m.Protocol, cfg.GlobalpingToken)
-						cancel()
-						if err == nil && len(res) > 0 {
-							_ = st.SaveProbes(m.ID, res)
-						}
-					}(meta)
-				}
-			}
-		}
-		knownMu.Unlock()
-		if err := st.IngestReport(rep); err != nil {
-			if errors.Is(err, store.ErrNodeRetired) {
-				http.Error(w, "node retired", http.StatusForbidden)
-				return
-			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		respPayload := model.ReportResponse{OK: true}
-		if syncCfg, md5Sum := config.ResolveAgentSyncConfig(cfg, rep.NodeID); syncCfg != nil && md5Sum != "" {
-			respPayload.ConfigMD5 = md5Sum
-			if r.Header.Get("X-Agent-Config-MD5") != md5Sum {
-				respPayload.AgentConfig = syncCfg
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(respPayload)
-	})
-
+	mux := newMasterMux(ctx, cfg, st, agg)
 	srv := &http.Server{Addr: cfg.ListenAddr, Handler: mux}
 	go func() {
 		log.Printf("master listening on %s", cfg.ListenAddr)
