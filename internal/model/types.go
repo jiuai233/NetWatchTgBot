@@ -82,6 +82,8 @@ type NodeSummary struct {
 	CycleTxBytes  int64
 	ResetDay      int
 	ExpireDate    string
+	AutoRenew     bool
+	BillingCycle  string
 	UpdatedAt     time.Time
 }
 

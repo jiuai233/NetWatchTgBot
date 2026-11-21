@@ -128,6 +128,8 @@ func (a *Aggregator) BuildOverview(period string) (model.OverviewView, error) {
 			CycleTxBytes: ctx,
 			ResetDay:     nd.ResetDay,
 			ExpireDate:   nd.ExpireDate,
+			AutoRenew:    nd.AutoRenew,
+			BillingCycle: nd.BillingCycle,
 			UpdatedAt:    latest.Timestamp,
 		})
 
@@ -249,6 +251,8 @@ func (a *Aggregator) BuildNodeDetail(nodeID, window string) (model.NodeDetailVie
 		CycleTxBytes: ctx,
 		ResetDay:     target.ResetDay,
 		ExpireDate:   target.ExpireDate,
+		AutoRenew:    target.AutoRenew,
+		BillingCycle: target.BillingCycle,
 		UpdatedAt:    latest.Timestamp,
 	}
 
